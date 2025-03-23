@@ -67,15 +67,23 @@ export default function ConversationList({
   }, [user]);
 
   const fetchConversations = async () => {
+    if (!user) return;
+
     try {
       setLoading(true);
       // Get all conversations the current user is part of
       const { data: userConversations, error } = await supabase
         .from("conversation_participants")
         .select("conversation_id")
-        .eq("user_id", user?.id);
+        .eq("user_id", user.id);
 
-      if (error) throw error;
+      if (error) {
+        console.error("Error fetching user conversations:", error);
+        setConversations([]);
+        setLoading(false);
+        return;
+      }
+
       if (!userConversations || userConversations.length === 0) {
         setConversations([]);
         setLoading(false);
@@ -85,12 +93,22 @@ export default function ConversationList({
       const conversationIds = userConversations.map((c) => c.conversation_id);
 
       // Get all participants for these conversations
-      const { data: participants } = await supabase
+      const { data: participants, error: participantsError } = await supabase
         .from("conversation_participants")
         .select("conversation_id, user_id")
         .in("conversation_id", conversationIds);
 
-      if (!participants) {
+      if (participantsError) {
+        console.error(
+          "Error fetching conversation participants:",
+          participantsError,
+        );
+        setConversations([]);
+        setLoading(false);
+        return;
+      }
+
+      if (!participants || participants.length === 0) {
         setConversations([]);
         setLoading(false);
         return;
@@ -98,10 +116,36 @@ export default function ConversationList({
 
       // Get user details for all participants
       const userIds = [...new Set(participants.map((p) => p.user_id))];
-      const { data: userProfiles } = await supabase
-        .from("auth.users")
-        .select("id, email, raw_user_meta_data")
+
+      // Try to get user data from users table first
+      const { data: userProfiles, error: profilesError } = await supabase
+        .from("users")
+        .select("id, email, full_name")
         .in("id", userIds);
+
+      let formattedUserProfiles;
+      if (profilesError || !userProfiles || userProfiles.length === 0) {
+        // Fallback to auth.users if users table fails
+        const { data: authUsers, error: authError } = await supabase
+          .from("auth.users")
+          .select("id, email, raw_user_meta_data")
+          .in("id", userIds);
+
+        if (authError) {
+          console.error("Error fetching user profiles:", authError);
+          setConversations([]);
+          setLoading(false);
+          return;
+        }
+
+        formattedUserProfiles = authUsers.map((user) => ({
+          id: user.id,
+          email: user.email,
+          full_name: user.raw_user_meta_data?.full_name || "User",
+        }));
+      } else {
+        formattedUserProfiles = userProfiles;
+      }
 
       // Get online status
       const { data: userStatus } = await supabase
@@ -120,22 +164,24 @@ export default function ConversationList({
       const { data: messageStatus } = await supabase
         .from("message_status")
         .select("message_id, user_id, is_read")
-        .in("user_id", [user?.id]);
+        .in("user_id", [user.id]);
 
       // Format conversations with participants and last message
       const formattedConversations = conversationIds.map((conversationId) => {
         const conversationParticipants = participants
           .filter(
             (p) =>
-              p.conversation_id === conversationId && p.user_id !== user?.id,
+              p.conversation_id === conversationId && p.user_id !== user.id,
           )
           .map((p) => {
-            const userProfile = userProfiles?.find((u) => u.id === p.user_id);
+            const userProfile = formattedUserProfiles.find(
+              (u) => u.id === p.user_id,
+            );
             const status = userStatus?.find((s) => s.user_id === p.user_id);
             return {
               id: p.user_id,
               email: userProfile?.email || "",
-              full_name: userProfile?.raw_user_meta_data?.full_name || "User",
+              full_name: userProfile?.full_name || "User",
               is_online: status?.is_online || false,
             };
           });
@@ -175,6 +221,7 @@ export default function ConversationList({
       setConversations(formattedConversations);
     } catch (error) {
       console.error("Error fetching conversations:", error);
+      setConversations([]);
     } finally {
       setLoading(false);
     }
@@ -205,13 +252,15 @@ export default function ConversationList({
   });
 
   return (
-    <div className="h-full flex flex-col bg-white border-r border-gray-200">
-      <div className="p-4 border-b border-gray-200">
+    <div className="h-full flex flex-col bg-white border-r border-gray-200 dark:bg-gray-800 dark:border-gray-700">
+      <div className="p-4 border-b border-gray-200 dark:border-gray-700">
         <div className="flex justify-between items-center mb-4">
-          <h2 className="text-xl font-semibold text-gray-900">Chats</h2>
+          <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
+            Chats
+          </h2>
           <Button
             onClick={onNewConversation}
-            className="h-8 w-8 p-0 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-600"
+            className="h-8 w-8 p-0 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-600 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-300"
             variant="ghost"
           >
             <Plus className="h-5 w-5" />
@@ -223,7 +272,7 @@ export default function ConversationList({
             placeholder="Search conversations..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="pl-9 h-10 rounded-full bg-gray-100 border-0 text-sm focus:ring-2 focus:ring-gray-200 focus-visible:ring-gray-200 focus-visible:ring-offset-0"
+            className="pl-9 h-10 rounded-full bg-gray-100 border-0 text-sm focus:ring-2 focus:ring-gray-200 focus-visible:ring-gray-200 focus-visible:ring-offset-0 dark:bg-gray-700 dark:text-white dark:focus:ring-gray-600"
           />
         </div>
       </div>
@@ -231,15 +280,15 @@ export default function ConversationList({
       <div className="overflow-y-auto flex-1">
         {loading ? (
           <div className="flex justify-center items-center p-8">
-            <div className="h-8 w-8 border-4 border-t-blue-500 border-gray-200 rounded-full animate-spin"></div>
+            <div className="h-8 w-8 border-4 border-t-blue-500 border-gray-200 rounded-full animate-spin dark:border-gray-600"></div>
           </div>
         ) : filteredConversations.length === 0 ? (
-          <div className="text-center p-8 text-gray-500">
+          <div className="text-center p-8 text-gray-500 dark:text-gray-400">
             {searchQuery ? "No conversations found" : "No conversations yet"}
             <div className="mt-2">
               <Button
                 onClick={onNewConversation}
-                className="text-blue-600 hover:text-blue-700 bg-blue-50 hover:bg-blue-100"
+                className="text-blue-600 hover:text-blue-700 bg-blue-50 hover:bg-blue-100 dark:text-blue-400 dark:bg-blue-900/30 dark:hover:bg-blue-900/50"
                 variant="ghost"
               >
                 Start a new conversation
@@ -262,7 +311,7 @@ export default function ConversationList({
             return (
               <div
                 key={conversation.id}
-                className={`flex items-center p-3 border-b border-gray-100 hover:bg-gray-50 cursor-pointer ${isActive ? "bg-blue-50" : ""}`}
+                className={`flex items-center p-3 border-b border-gray-100 hover:bg-gray-50 cursor-pointer ${isActive ? "bg-blue-50 dark:bg-blue-900/20" : ""} dark:border-gray-700 dark:hover:bg-gray-700`}
                 onClick={() => onConversationSelect(conversation.id)}
               >
                 <div className="relative">
@@ -273,23 +322,23 @@ export default function ConversationList({
                     <AvatarFallback>{otherUser.full_name[0]}</AvatarFallback>
                   </Avatar>
                   <span
-                    className={`absolute bottom-0 right-0 h-3 w-3 rounded-full ${otherUser.is_online ? "bg-green-500" : "bg-gray-300"} border-2 border-white`}
+                    className={`absolute bottom-0 right-0 h-3 w-3 rounded-full ${otherUser.is_online ? "bg-green-500" : "bg-gray-300 dark:bg-gray-500"} border-2 border-white dark:border-gray-800`}
                   ></span>
                 </div>
                 <div className="ml-3 flex-1 overflow-hidden">
                   <div className="flex justify-between items-center">
-                    <h4 className="font-medium text-sm truncate text-gray-900">
+                    <h4 className="font-medium text-sm truncate text-gray-900 dark:text-white">
                       {otherUser.full_name}
                     </h4>
                     {conversation.lastMessage && (
-                      <span className="text-xs text-gray-500">
+                      <span className="text-xs text-gray-500 dark:text-gray-400">
                         {formatMessageTime(conversation.lastMessage.created_at)}
                       </span>
                     )}
                   </div>
                   <div className="flex items-center">
                     <p
-                      className={`text-xs truncate ${isUnread ? "text-gray-900 font-medium" : "text-gray-500"}`}
+                      className={`text-xs truncate ${isUnread ? "text-gray-900 font-medium dark:text-white" : "text-gray-500 dark:text-gray-400"}`}
                     >
                       {conversation.lastMessage
                         ? conversation.lastMessage.sender_id === user?.id

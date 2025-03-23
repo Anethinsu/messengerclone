@@ -29,9 +29,11 @@ export default function UsersList() {
   const { user: currentUser } = useAuth();
 
   useEffect(() => {
-    fetchUsers();
-    fetchBlockedUsers();
-  }, []);
+    if (currentUser) {
+      fetchUsers();
+      fetchBlockedUsers();
+    }
+  }, [currentUser]);
 
   const fetchBlockedUsers = async () => {
     if (!currentUser) return;
@@ -53,14 +55,49 @@ export default function UsersList() {
   };
 
   const fetchUsers = async () => {
+    if (!currentUser) return;
+
     try {
       setLoading(true);
       const { data: authUsers, error } = await supabase
-        .from("auth.users")
-        .select("id, email, raw_user_meta_data")
+        .from("users")
+        .select("id, email, full_name")
         .neq("id", currentUser?.id || "");
 
-      if (error) throw error;
+      if (error) {
+        console.error("Error fetching users:", error);
+        // Try fallback to auth.users if users table fails
+        const { data: fallbackUsers, error: fallbackError } = await supabase
+          .from("auth.users")
+          .select("id, email, raw_user_meta_data")
+          .neq("id", currentUser?.id || "");
+
+        if (fallbackError) throw fallbackError;
+
+        if (!fallbackUsers || fallbackUsers.length === 0) {
+          setUsers([]);
+          setLoading(false);
+          return;
+        }
+
+        // Format users from auth.users
+        const formattedFallbackUsers = fallbackUsers.map((user) => ({
+          id: user.id,
+          email: user.email,
+          full_name: user.raw_user_meta_data?.full_name || "User",
+          is_blocked: blockedUsers.includes(user.id),
+        }));
+
+        setUsers(formattedFallbackUsers);
+        setLoading(false);
+        return;
+      }
+
+      if (!authUsers || authUsers.length === 0) {
+        setUsers([]);
+        setLoading(false);
+        return;
+      }
 
       // Get online status for each user
       const { data: userStatus } = await supabase
@@ -82,7 +119,7 @@ export default function UsersList() {
         return {
           id: authUser.id,
           email: authUser.email,
-          full_name: authUser.raw_user_meta_data?.full_name || "User",
+          full_name: authUser.full_name || "User",
           is_online: status?.is_online || false,
           last_active: status?.last_active,
           status: status?.status,
@@ -94,6 +131,7 @@ export default function UsersList() {
       setUsers(formattedUsers);
     } catch (error) {
       console.error("Error fetching users:", error);
+      setUsers([]);
     } finally {
       setLoading(false);
     }
@@ -232,16 +270,18 @@ export default function UsersList() {
   );
 
   return (
-    <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-      <div className="p-4 border-b border-gray-100">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">People</h2>
+    <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden dark:bg-gray-800 dark:border-gray-700">
+      <div className="p-4 border-b border-gray-100 dark:border-gray-700">
+        <h2 className="text-lg font-semibold text-gray-900 mb-4 dark:text-white">
+          People
+        </h2>
         <div className="relative">
           <Search className="absolute left-3 top-3 h-4 w-4 text-gray-400" />
           <Input
             placeholder="Search users..."
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            className="pl-9 h-10 rounded-full bg-gray-100 border-0 text-sm focus:ring-2 focus:ring-gray-200 focus-visible:ring-gray-200 focus-visible:ring-offset-0"
+            className="pl-9 h-10 rounded-full bg-gray-100 border-0 text-sm focus:ring-2 focus:ring-gray-200 focus-visible:ring-gray-200 focus-visible:ring-offset-0 dark:bg-gray-700 dark:text-white dark:focus:ring-gray-600"
           />
         </div>
       </div>
@@ -249,21 +289,21 @@ export default function UsersList() {
       <div className="overflow-y-auto max-h-[calc(100vh-250px)]">
         {loading ? (
           <div className="flex justify-center items-center p-8">
-            <div className="h-8 w-8 border-4 border-t-blue-500 border-gray-200 rounded-full animate-spin"></div>
+            <div className="h-8 w-8 border-4 border-t-blue-500 border-gray-200 rounded-full animate-spin dark:border-gray-600"></div>
           </div>
         ) : filteredUsers.length === 0 ? (
-          <div className="text-center p-8 text-gray-500">
+          <div className="text-center p-8 text-gray-500 dark:text-gray-400">
             {searchQuery ? "No users found" : "No users available"}
           </div>
         ) : (
           filteredUsers.map((user) => (
             <div
               key={user.id}
-              className="flex items-center justify-between p-4 hover:bg-gray-50 border-b border-gray-100 last:border-b-0"
+              className="flex items-center justify-between p-4 hover:bg-gray-50 border-b border-gray-100 last:border-b-0 dark:hover:bg-gray-700 dark:border-gray-700"
             >
               <div className="flex items-center">
                 <div className="relative">
-                  <Avatar className="h-10 w-10 border-2 border-gray-100">
+                  <Avatar className="h-10 w-10 border-2 border-gray-100 dark:border-gray-600">
                     <AvatarImage
                       src={
                         user.avatar_url ||
@@ -273,11 +313,11 @@ export default function UsersList() {
                     <AvatarFallback>{user.full_name[0]}</AvatarFallback>
                   </Avatar>
                   <span
-                    className={`absolute bottom-0 right-0 h-3 w-3 rounded-full ${user.is_online ? (user.status === "away" ? "bg-yellow-500" : user.status === "busy" ? "bg-red-500" : "bg-green-500") : "bg-gray-300"} border-2 border-white`}
+                    className={`absolute bottom-0 right-0 h-3 w-3 rounded-full ${user.is_online ? (user.status === "away" ? "bg-yellow-500" : user.status === "busy" ? "bg-red-500" : "bg-green-500") : "bg-gray-300"} border-2 border-white dark:border-gray-800`}
                   ></span>
                 </div>
                 <div className="ml-3">
-                  <h3 className="text-sm font-medium text-gray-900 dark:text-darktext">
+                  <h3 className="text-sm font-medium text-gray-900 dark:text-white">
                     {user.full_name}
                     {user.is_blocked && (
                       <span className="ml-2 text-xs text-red-500">
@@ -285,7 +325,7 @@ export default function UsersList() {
                       </span>
                     )}
                   </h3>
-                  <p className="text-xs text-gray-500 dark:text-darktextmuted">
+                  <p className="text-xs text-gray-500 dark:text-gray-400">
                     {user.email}
                   </p>
                 </div>
@@ -297,7 +337,7 @@ export default function UsersList() {
                   }
                   size="sm"
                   variant="outline"
-                  className={`rounded-full h-8 w-8 p-0 ${user.is_blocked ? "bg-red-100 hover:bg-red-200 text-red-600" : "bg-gray-100 hover:bg-gray-200 text-gray-600"}`}
+                  className={`rounded-full h-8 w-8 p-0 ${user.is_blocked ? "bg-red-100 hover:bg-red-200 text-red-600 dark:bg-red-900 dark:hover:bg-red-800 dark:text-red-300" : "bg-gray-100 hover:bg-gray-200 text-gray-600 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-300"}`}
                 >
                   <svg
                     xmlns="http://www.w3.org/2000/svg"
@@ -326,7 +366,7 @@ export default function UsersList() {
                 <Button
                   onClick={() => startConversation(user.id)}
                   size="sm"
-                  className="bg-blue-600 hover:bg-blue-700 text-white rounded-full h-8 w-8 p-0"
+                  className="bg-blue-600 hover:bg-blue-700 text-white rounded-full h-8 w-8 p-0 dark:bg-blue-700 dark:hover:bg-blue-800"
                   disabled={user.is_blocked}
                 >
                   <MessageCircle className="h-4 w-4" />

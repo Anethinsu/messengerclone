@@ -73,7 +73,7 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (conversationId) {
+    if (conversationId && user) {
       fetchMessages();
       fetchParticipants();
       markMessagesAsRead();
@@ -120,7 +120,7 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
         typingSubscription.unsubscribe();
       };
     }
-  }, [conversationId]);
+  }, [conversationId, user]);
 
   useEffect(() => {
     scrollToBottom();
@@ -131,7 +131,7 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
   };
 
   const fetchMessages = async () => {
-    if (!conversationId) return;
+    if (!conversationId || !user) return;
 
     try {
       setLoading(true);
@@ -141,13 +141,27 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
         .eq("conversation_id", conversationId)
         .order("created_at", { ascending: true });
 
-      if (error) throw error;
+      if (error) {
+        console.error("Error fetching messages:", error);
+        setLoading(false);
+        return;
+      }
+
+      if (!data || data.length === 0) {
+        setMessages([]);
+        setLoading(false);
+        return;
+      }
 
       // Get read status for messages
-      const { data: messageStatus } = await supabase
+      const { data: messageStatus, error: statusError } = await supabase
         .from("message_status")
         .select("message_id, is_read")
-        .eq("user_id", user?.id);
+        .eq("user_id", user.id);
+
+      if (statusError) {
+        console.error("Error fetching message status:", statusError);
+      }
 
       const messagesWithReadStatus = data.map((message) => ({
         ...message,
@@ -158,14 +172,14 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
 
       setMessages(messagesWithReadStatus);
     } catch (error) {
-      console.error("Error fetching messages:", error);
+      console.error("Error in fetchMessages:", error);
     } finally {
       setLoading(false);
     }
   };
 
   const fetchParticipants = async () => {
-    if (!conversationId) return;
+    if (!conversationId || !user) return;
 
     try {
       const { data: participantData, error } = await supabase
@@ -173,37 +187,84 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
         .select("user_id")
         .eq("conversation_id", conversationId);
 
-      if (error) throw error;
+      if (error) {
+        console.error("Error fetching participants:", error);
+        return;
+      }
+
+      if (!participantData || participantData.length === 0) {
+        setParticipants([]);
+        return;
+      }
 
       const userIds = participantData
         .map((p) => p.user_id)
-        .filter((id) => id !== user?.id);
+        .filter((id) => id !== user.id);
 
-      const { data: userProfiles } = await supabase
-        .from("auth.users")
-        .select("id, email, raw_user_meta_data")
+      if (userIds.length === 0) {
+        setParticipants([]);
+        return;
+      }
+
+      // Try to get user data from users table first
+      const { data: userProfiles, error: profilesError } = await supabase
+        .from("users")
+        .select("id, email, full_name")
         .in("id", userIds);
 
+      if (profilesError || !userProfiles || userProfiles.length === 0) {
+        // Fallback to auth.users if users table fails
+        const { data: authUsers, error: authError } = await supabase
+          .from("auth.users")
+          .select("id, email, raw_user_meta_data")
+          .in("id", userIds);
+
+        if (authError) {
+          console.error("Error fetching user profiles:", authError);
+          return;
+        }
+
+        const { data: userStatus } = await supabase
+          .from("user_status")
+          .select("user_id, is_online")
+          .in("user_id", userIds);
+
+        const formattedParticipants =
+          authUsers?.map((profile) => {
+            const status = userStatus?.find((s) => s.user_id === profile.id);
+            return {
+              id: profile.id,
+              email: profile.email,
+              full_name: profile.raw_user_meta_data?.full_name || "User",
+              is_online: status?.is_online || false,
+              is_typing: false,
+            };
+          }) || [];
+
+        setParticipants(formattedParticipants);
+        return;
+      }
+
+      // If we have user profiles from the users table
       const { data: userStatus } = await supabase
         .from("user_status")
         .select("user_id, is_online")
         .in("user_id", userIds);
 
-      const formattedParticipants =
-        userProfiles?.map((profile) => {
-          const status = userStatus?.find((s) => s.user_id === profile.id);
-          return {
-            id: profile.id,
-            email: profile.email,
-            full_name: profile.raw_user_meta_data?.full_name || "User",
-            is_online: status?.is_online || false,
-            is_typing: false,
-          };
-        }) || [];
+      const formattedParticipants = userProfiles.map((profile) => {
+        const status = userStatus?.find((s) => s.user_id === profile.id);
+        return {
+          id: profile.id,
+          email: profile.email,
+          full_name: profile.full_name,
+          is_online: status?.is_online || false,
+          is_typing: false,
+        };
+      });
 
       setParticipants(formattedParticipants);
     } catch (error) {
-      console.error("Error fetching participants:", error);
+      console.error("Error in fetchParticipants:", error);
     }
   };
 
@@ -212,21 +273,31 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
 
     try {
       // Get all messages in this conversation not sent by current user
-      const { data: unreadMessages } = await supabase
+      const { data: unreadMessages, error: messagesError } = await supabase
         .from("messages")
         .select("id")
         .eq("conversation_id", conversationId)
         .neq("user_id", user.id);
 
+      if (messagesError) {
+        console.error("Error fetching unread messages:", messagesError);
+        return;
+      }
+
       if (!unreadMessages || unreadMessages.length === 0) return;
 
       // Check which messages already have status records
       const messageIds = unreadMessages.map((m) => m.id);
-      const { data: existingStatus } = await supabase
+      const { data: existingStatus, error: statusError } = await supabase
         .from("message_status")
         .select("message_id")
         .eq("user_id", user.id)
         .in("message_id", messageIds);
+
+      if (statusError) {
+        console.error("Error fetching message status:", statusError);
+        return;
+      }
 
       const existingMessageIds = existingStatus?.map((s) => s.message_id) || [];
 
@@ -243,12 +314,18 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
         }));
 
       if (newStatusRecords.length > 0) {
-        await supabase.from("message_status").insert(newStatusRecords);
+        const { error: insertError } = await supabase
+          .from("message_status")
+          .insert(newStatusRecords);
+
+        if (insertError) {
+          console.error("Error inserting message status:", insertError);
+        }
       }
 
       // Update existing status records
       if (existingMessageIds.length > 0) {
-        await supabase
+        const { error: updateError } = await supabase
           .from("message_status")
           .update({
             is_read: true,
@@ -256,6 +333,10 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
           })
           .eq("user_id", user.id)
           .in("message_id", existingMessageIds);
+
+        if (updateError) {
+          console.error("Error updating message status:", updateError);
+        }
       }
     } catch (error) {
       console.error("Error marking messages as read:", error);
@@ -266,29 +347,44 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
     if (!user) return;
 
     try {
-      const { data: existingStatus } = await supabase
+      const { data: existingStatus, error: statusError } = await supabase
         .from("message_status")
         .select("id")
         .eq("user_id", user.id)
         .eq("message_id", messageId);
 
+      if (statusError) {
+        console.error("Error checking message status:", statusError);
+        return;
+      }
+
       if (existingStatus && existingStatus.length > 0) {
-        await supabase
+        const { error: updateError } = await supabase
           .from("message_status")
           .update({
             is_read: true,
             read_at: new Date().toISOString(),
           })
           .eq("id", existingStatus[0].id);
+
+        if (updateError) {
+          console.error("Error updating message status:", updateError);
+        }
       } else {
-        await supabase.from("message_status").insert({
-          message_id: messageId,
-          user_id: user.id,
-          is_delivered: true,
-          is_read: true,
-          delivered_at: new Date().toISOString(),
-          read_at: new Date().toISOString(),
-        });
+        const { error: insertError } = await supabase
+          .from("message_status")
+          .insert({
+            message_id: messageId,
+            user_id: user.id,
+            is_delivered: true,
+            is_read: true,
+            delivered_at: new Date().toISOString(),
+            read_at: new Date().toISOString(),
+          });
+
+        if (insertError) {
+          console.error("Error inserting message status:", insertError);
+        }
       }
     } catch (error) {
       console.error("Error marking message as read:", error);
@@ -329,36 +425,59 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
         })
         .select();
 
-      if (error) throw error;
+      if (error) {
+        console.error("Error sending message:", error);
+        return;
+      }
+
+      if (!data || data.length === 0) {
+        console.error("No data returned after sending message");
+        return;
+      }
 
       // Create message status for sender (delivered and read)
-      await supabase.from("message_status").insert({
-        message_id: data[0].id,
-        user_id: user.id,
-        is_delivered: true,
-        is_read: true,
-        delivered_at: new Date().toISOString(),
-        read_at: new Date().toISOString(),
-      });
+      const { error: statusError } = await supabase
+        .from("message_status")
+        .insert({
+          message_id: data[0].id,
+          user_id: user.id,
+          is_delivered: true,
+          is_read: true,
+          delivered_at: new Date().toISOString(),
+          read_at: new Date().toISOString(),
+        });
+
+      if (statusError) {
+        console.error("Error creating message status for sender:", statusError);
+      }
 
       // Create message status for other participants (delivered but not read)
-      const otherParticipants = participants.map((p) => ({
-        message_id: data[0].id,
-        user_id: p.id,
-        is_delivered: true,
-        is_read: false,
-        delivered_at: new Date().toISOString(),
-      }));
+      if (participants.length > 0) {
+        const otherParticipants = participants.map((p) => ({
+          message_id: data[0].id,
+          user_id: p.id,
+          is_delivered: true,
+          is_read: false,
+          delivered_at: new Date().toISOString(),
+        }));
 
-      if (otherParticipants.length > 0) {
-        await supabase.from("message_status").insert(otherParticipants);
+        const { error: participantsStatusError } = await supabase
+          .from("message_status")
+          .insert(otherParticipants);
+
+        if (participantsStatusError) {
+          console.error(
+            "Error creating message status for participants:",
+            participantsStatusError,
+          );
+        }
       }
 
       setNewMessage("");
       // Stop typing indicator when message is sent
       handleTypingStop();
     } catch (error) {
-      console.error("Error sending message:", error);
+      console.error("Error in handleSendMessage:", error);
     }
   };
 
@@ -394,7 +513,10 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
           .from("message-attachments")
           .upload(filePath, audioBlob);
 
-        if (uploadError) throw uploadError;
+        if (uploadError) {
+          console.error("Error uploading voice message:", uploadError);
+          return;
+        }
 
         // Get public URL
         const { data } = supabase.storage
@@ -441,7 +563,10 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
         .from("message-attachments")
         .upload(filePath, file);
 
-      if (uploadError) throw uploadError;
+      if (uploadError) {
+        console.error("Error uploading file:", uploadError);
+        return;
+      }
 
       // Get public URL
       const { data } = supabase.storage
@@ -466,7 +591,7 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
         fileInputRef.current.value = "";
       }
     } catch (error) {
-      console.error("Error uploading file:", error);
+      console.error("Error in handleFileUpload:", error);
     }
   };
 
@@ -518,14 +643,14 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
 
   if (!conversationId) {
     return (
-      <div className="h-full flex items-center justify-center bg-gray-50 text-gray-500">
+      <div className="h-full flex items-center justify-center bg-gray-50 text-gray-500 dark:bg-gray-800 dark:text-gray-400">
         <div className="text-center">
           <div className="flex justify-center mb-4">
-            <div className="h-16 w-16 bg-blue-100 rounded-full flex items-center justify-center">
-              <Send className="h-8 w-8 text-blue-600" />
+            <div className="h-16 w-16 bg-blue-100 rounded-full flex items-center justify-center dark:bg-blue-900">
+              <Send className="h-8 w-8 text-blue-600 dark:text-blue-400" />
             </div>
           </div>
-          <h3 className="text-xl font-medium text-gray-700 mb-2">
+          <h3 className="text-xl font-medium text-gray-700 mb-2 dark:text-gray-300">
             Your Messages
           </h3>
           <p className="max-w-md mx-auto">
@@ -544,9 +669,9 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
   };
 
   return (
-    <div className="h-full flex flex-col bg-white">
+    <div className="h-full flex flex-col bg-white dark:bg-gray-800">
       {/* Chat header */}
-      <div className="p-3 border-b border-gray-200 flex justify-between items-center bg-white">
+      <div className="p-3 border-b border-gray-200 flex justify-between items-center bg-white dark:bg-gray-800 dark:border-gray-700">
         <div className="flex items-center">
           <Avatar className="h-10 w-10">
             <AvatarImage
@@ -555,8 +680,10 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
             <AvatarFallback>{otherUser.full_name[0]}</AvatarFallback>
           </Avatar>
           <div className="ml-3">
-            <h3 className="font-medium text-gray-900">{otherUser.full_name}</h3>
-            <p className="text-xs text-green-500">
+            <h3 className="font-medium text-gray-900 dark:text-white">
+              {otherUser.full_name}
+            </h3>
+            <p className="text-xs text-green-500 dark:text-green-400">
               {otherUser.is_typing
                 ? "Typing..."
                 : otherUser.is_online
@@ -569,9 +696,9 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
           <Button
             variant="ghost"
             size="icon"
-            className="h-9 w-9 rounded-full bg-gray-100 hover:bg-gray-200"
+            className="h-9 w-9 rounded-full bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600"
           >
-            <Phone className="h-4 w-4 text-gray-600" />
+            <Phone className="h-4 w-4 text-gray-600 dark:text-gray-300" />
           </Button>
           <Button
             variant="ghost"
@@ -584,21 +711,21 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
           <Button
             variant="ghost"
             size="icon"
-            className="h-9 w-9 rounded-full bg-gray-100 hover:bg-gray-200"
+            className="h-9 w-9 rounded-full bg-gray-100 hover:bg-gray-200 dark:bg-gray-700 dark:hover:bg-gray-600"
           >
-            <Info className="h-4 w-4 text-gray-600" />
+            <Info className="h-4 w-4 text-gray-600 dark:text-gray-300" />
           </Button>
         </div>
       </div>
 
       {/* Messages */}
-      <div className="flex-1 p-4 overflow-y-auto bg-gray-50">
+      <div className="flex-1 p-4 overflow-y-auto bg-gray-50 dark:bg-gray-900">
         {loading ? (
           <div className="flex justify-center items-center h-full">
-            <div className="h-8 w-8 border-4 border-t-blue-500 border-gray-200 rounded-full animate-spin"></div>
+            <div className="h-8 w-8 border-4 border-t-blue-500 border-gray-200 rounded-full animate-spin dark:border-gray-700"></div>
           </div>
         ) : messages.length === 0 ? (
-          <div className="flex items-center justify-center h-full text-gray-500">
+          <div className="flex items-center justify-center h-full text-gray-500 dark:text-gray-400">
             <div className="text-center">
               <p>No messages yet</p>
               <p className="text-sm mt-1">
@@ -674,7 +801,7 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
                       className={`flex items-center mt-1 space-x-1 ${isCurrentUser ? "justify-end" : ""}`}
                     >
                       <span
-                        className={`text-xs ${isCurrentUser ? "text-blue-100" : "text-gray-500"}`}
+                        className={`text-xs ${isCurrentUser ? "text-blue-100" : "text-gray-500 dark:text-gray-400"}`}
                       >
                         {formatMessageTime(message.created_at)}
                       </span>
@@ -705,11 +832,11 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
                   />
                   <AvatarFallback>{otherUser.full_name[0]}</AvatarFallback>
                 </Avatar>
-                <div className="bg-gray-200 rounded-full px-4 py-2">
+                <div className="bg-gray-200 rounded-full px-4 py-2 dark:bg-gray-700">
                   <div className="flex space-x-1">
-                    <div className="h-2 w-2 bg-gray-500 rounded-full animate-bounce"></div>
-                    <div className="h-2 w-2 bg-gray-500 rounded-full animate-bounce delay-100"></div>
-                    <div className="h-2 w-2 bg-gray-500 rounded-full animate-bounce delay-200"></div>
+                    <div className="h-2 w-2 bg-gray-500 rounded-full animate-bounce dark:bg-gray-400"></div>
+                    <div className="h-2 w-2 bg-gray-500 rounded-full animate-bounce delay-100 dark:bg-gray-400"></div>
+                    <div className="h-2 w-2 bg-gray-500 rounded-full animate-bounce delay-200 dark:bg-gray-400"></div>
                   </div>
                 </div>
               </div>
@@ -783,12 +910,12 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
             }}
             onKeyDown={handleKeyDown}
             placeholder="Type a message..."
-            className="flex-1 border rounded-full px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+            className="flex-1 border rounded-full px-4 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300 dark:bg-gray-700 dark:border-gray-600 dark:text-white dark:focus:ring-blue-700"
           />
           <Button
             onClick={() => handleSendMessage()}
             disabled={!newMessage.trim()}
-            className="ml-2 h-10 w-10 rounded-full bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+            className="ml-2 h-10 w-10 rounded-full bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-50 disabled:cursor-not-allowed dark:bg-blue-700 dark:hover:bg-blue-800"
           >
             <Send className="h-5 w-5" />
           </Button>
@@ -797,12 +924,12 @@ export default function ChatArea({ conversationId }: ChatAreaProps) {
 
       {/* Video Call Dialog */}
       <Dialog open={showVideoCall} onOpenChange={setShowVideoCall}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md dark:bg-gray-800">
           <DialogHeader>
-            <DialogTitle>Video Call</DialogTitle>
+            <DialogTitle className="dark:text-white">Video Call</DialogTitle>
           </DialogHeader>
-          <div className="flex flex-col items-center justify-center h-64 bg-gray-100 dark:bg-gray-800 rounded-md">
-            <Video className="h-12 w-12 text-gray-400 mb-4" />
+          <div className="flex flex-col items-center justify-center h-64 bg-gray-100 dark:bg-gray-700 rounded-md">
+            <Video className="h-12 w-12 text-gray-400 mb-4 dark:text-gray-300" />
             <p className="text-center text-gray-500 dark:text-gray-400">
               Video calling functionality will be implemented with a third-party
               service like Twilio or WebRTC.
