@@ -30,8 +30,18 @@ export default function UsersList() {
 
   useEffect(() => {
     if (currentUser) {
-      fetchUsers();
       fetchBlockedUsers();
+      fetchUsers();
+
+      // Set up a timer to retry fetching users if the list is empty
+      const timer = setTimeout(() => {
+        if (users.length === 0 && !loading) {
+          console.log("Retrying user fetch...");
+          fetchUsers();
+        }
+      }, 2000);
+
+      return () => clearTimeout(timer);
     }
   }, [currentUser]);
 
@@ -59,22 +69,31 @@ export default function UsersList() {
 
     try {
       setLoading(true);
+      console.log("Fetching users...");
+
+      // First try to get users from the public users table
       const { data: authUsers, error } = await supabase
         .from("users")
         .select("id, email, full_name")
         .neq("id", currentUser?.id || "");
 
-      if (error) {
-        console.error("Error fetching users:", error);
-        // Try fallback to auth.users if users table fails
+      if (error || !authUsers || authUsers.length === 0) {
+        console.log("Falling back to auth.users table");
+        // Try fallback to auth.users if users table fails or is empty
         const { data: fallbackUsers, error: fallbackError } = await supabase
           .from("auth.users")
           .select("id, email, raw_user_meta_data")
           .neq("id", currentUser?.id || "");
 
-        if (fallbackError) throw fallbackError;
+        if (fallbackError) {
+          console.error("Error fetching from auth.users:", fallbackError);
+          setUsers([]);
+          setLoading(false);
+          return;
+        }
 
         if (!fallbackUsers || fallbackUsers.length === 0) {
+          console.log("No users found in auth.users");
           setUsers([]);
           setLoading(false);
           return;
@@ -88,16 +107,15 @@ export default function UsersList() {
           is_blocked: blockedUsers.includes(user.id),
         }));
 
+        console.log(
+          `Found ${formattedFallbackUsers.length} users from auth.users`,
+        );
         setUsers(formattedFallbackUsers);
         setLoading(false);
         return;
       }
 
-      if (!authUsers || authUsers.length === 0) {
-        setUsers([]);
-        setLoading(false);
-        return;
-      }
+      console.log(`Found ${authUsers.length} users from users table`);
 
       // Get online status for each user
       const { data: userStatus } = await supabase
@@ -202,14 +220,46 @@ export default function UsersList() {
   };
 
   const startConversation = async (userId: string) => {
+    if (!currentUser) {
+      toast({
+        title: "Error",
+        description: "You must be logged in to start a conversation",
+        variant: "destructive",
+        duration: 3000,
+      });
+      return;
+    }
+
     try {
+      toast({
+        title: "Starting conversation",
+        description: "Please wait...",
+        duration: 2000,
+      });
+
       // Check if conversation already exists
-      const { data: existingConversations } = await supabase
+      const { data: existingConversations, error: convError } = await supabase
         .from("conversation_participants")
         .select("conversation_id")
-        .eq("user_id", currentUser?.id);
+        .eq("user_id", currentUser.id);
 
-      if (!existingConversations) return;
+      if (convError) {
+        console.error("Error fetching existing conversations:", convError);
+        toast({
+          title: "Error",
+          description: "Could not check existing conversations",
+          variant: "destructive",
+          duration: 3000,
+        });
+        return;
+      }
+
+      if (!existingConversations) {
+        console.log("No existing conversations found");
+        // Create new conversation directly
+        createNewConversation(userId);
+        return;
+      }
 
       const conversationIds = existingConversations.map(
         (c) => c.conversation_id,
@@ -229,13 +279,39 @@ export default function UsersList() {
         return;
       }
 
+      // Create new conversation function
+      createNewConversation(userId);
+    } catch (error) {
+      console.error("Error starting conversation:", error);
+      toast({
+        title: "Error",
+        description: "Could not start conversation",
+        variant: "destructive",
+        duration: 3000,
+      });
+    }
+  };
+
+  const createNewConversation = async (userId: string) => {
+    try {
+      console.log("Creating new conversation with user:", userId);
       // Create new conversation
       const { data: newConversation, error } = await supabase
         .from("conversations")
         .insert({})
         .select();
 
-      if (error || !newConversation) throw error;
+      if (error) {
+        console.error("Error creating conversation:", error);
+        throw error;
+      }
+
+      if (!newConversation || newConversation.length === 0) {
+        console.error("No conversation created");
+        throw new Error("No conversation created");
+      }
+
+      console.log("New conversation created:", newConversation[0].id);
 
       // Add participants
       const participants = [
@@ -243,7 +319,16 @@ export default function UsersList() {
         { conversation_id: newConversation[0].id, user_id: userId },
       ];
 
-      await supabase.from("conversation_participants").insert(participants);
+      const { error: participantsError } = await supabase
+        .from("conversation_participants")
+        .insert(participants);
+
+      if (participantsError) {
+        console.error("Error adding participants:", participantsError);
+        throw participantsError;
+      }
+
+      console.log("Participants added successfully");
 
       // Navigate to the conversation
       navigate(`/dashboard?conversation=${newConversation[0].id}`);
@@ -253,10 +338,10 @@ export default function UsersList() {
         duration: 3000,
       });
     } catch (error) {
-      console.error("Error starting conversation:", error);
+      console.error("Error in createNewConversation:", error);
       toast({
         title: "Error",
-        description: "Could not start conversation",
+        description: "Could not create conversation",
         variant: "destructive",
         duration: 3000,
       });
@@ -289,7 +374,7 @@ export default function UsersList() {
       <div className="overflow-y-auto max-h-[calc(100vh-250px)]">
         {loading ? (
           <div className="flex justify-center items-center p-8">
-            <div className="h-8 w-8 border-4 border-t-blue-500 border-gray-200 rounded-full animate-spin dark:border-gray-600"></div>
+            <div className="h-8 w-8 border-4 border-t-blue-500 border-gray-200 rounded-full animate-spin dark:border-gray-600 dark:border-t-blue-400"></div>
           </div>
         ) : filteredUsers.length === 0 ? (
           <div className="text-center p-8 text-gray-500 dark:text-gray-400">
